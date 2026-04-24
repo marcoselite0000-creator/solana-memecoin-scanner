@@ -148,6 +148,7 @@ def extrair_dados_pump(data: dict) -> dict:
         'dex_url': dex_url,
         'idade_min': 0,  # token acabou de nascer
         'variacao_5m': 0,
+                'preco_token_usd': mc_usd / SUPPLY_PADRAO if SUPPLY_PADRAO > 0 else 0,
     }
 
 
@@ -185,6 +186,12 @@ async def processar_token(data: dict, tracker: Tracker):
         alertar_terminal(dados, tracker)
         await alertar_telegram(dados, tracker)
         tracker.registrar_alerta()
+
+                # Paper Trading: abre posicao
+        if len(PAPER_POSITIONS) < PAPER_MAX_POS:
+            preco = dados.get('preco_token_usd', 0)
+            if preco > 0:
+                paper_abrir(dados['mint'], dados['nome'], dados['simbolo'], dados['mc'], preco)
     else:
         simbolo = dados.get('simbolo', '?')
         mc = dados.get('mc', 0)
@@ -192,6 +199,15 @@ async def processar_token(data: dict, tracker: Tracker):
         print(f"[REPROVADO] {simbolo} MC=${mc:,.0f} Liq=${liq:,.0f} | {', '.join(razoes)}")
 
     tracker.registrar_scan()
+async def verificar_posicoes_loop():
+    '''Loop de verificacao de posicoes paper trading'''
+    while True:
+        try:
+            paper_verificar()
+        except:
+            pass
+        await asyncio.sleep(30)
+
 
 
 async def escutar_pump():
@@ -199,13 +215,15 @@ async def escutar_pump():
     tracker = Tracker(CAPITAL_TOTAL)
     inicializar_log()
     get_sol_price()  # busca preco inicial do SOL
+        asyncio.create_task(verificar_posicoes_loop())
 
     print("=" * 60)
-    print(" SOLANA MEMECOIN SCANNER v2 - Iniciando...")
+    print(" SOLANA MEMECOIN SCANNER v3 - Paper Trading - Iniciando...")
     print(f" Capital: ${CAPITAL_TOTAL} | Meta: +{tracker.meta_pct}%/dia")
     print(f" Filtros: MC ${MC_MIN:,}-${MC_MAX:,} | Liq min: ${LIQUIDEZ_MIN:,}")
     print(f" SOL Price: ${get_sol_price()}")
     print("=" * 60)
+        print(f" {paper_status()}")
 
     while True:
         try:
