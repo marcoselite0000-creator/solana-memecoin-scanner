@@ -20,11 +20,9 @@ STOP_DIARIO_PCT = 5     # Stop loss diario em % (para o dia se perder isso)
 TAKE_PROFIT_X = 2.0     # Vende quando preco dobrar (2x)
 STOP_LOSS_PCT = 50      # Stop loss por trade em % de perda
 
-# --- TELEGRAM ALERTS (opcional) ---
-# Para ativar: crie um bot em @BotFather no Telegram e cole o token abaixo
-# Deixe como None para usar apenas o terminal
-TELEGRAM_TOKEN = None   # Ex: '123456:ABC-DEF...'
-TELEGRAM_CHAT_ID = None # Ex: '987654321'
+# --- TELEGRAM ALERTS ---
+TELEGRAM_TOKEN = '8508360616:AAF1sc8PzkkRcPWT5H-TgGusaKJXw4BHbyU'
+TELEGRAM_CHAT_ID = '8751092942'
 
 # --- FONTES DE DADOS (gratuitas) ---
 PUMP_WS_URL = 'wss://pumpportal.fun/api/data'
