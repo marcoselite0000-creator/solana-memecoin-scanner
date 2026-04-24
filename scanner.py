@@ -1,7 +1,6 @@
 # ============================================================
 # scanner.py — Nucleo do sistema: escuta Pump.fun em tempo real
-# CORRECAO v2: usa dados do WebSocket diretamente (sem delay Dexscreener)
-# ============================================================
+# v3: Paper Trading integrado inline | Sem narrativas# ============================================================
 
 import asyncio
 import json
@@ -15,6 +14,53 @@ import requests
 from config import PUMP_WS_URL, LOG_FILE, CAPITAL_TOTAL, MC_MIN, MC_MAX, LIQUIDEZ_MIN, IDADE_MAX_MIN, TAMANHO_POSICAO
 from alerts import alertar_terminal, alertar_telegram
 from tracker import Tracker
+
+# ===== PAPER TRADING (inline) =====
+SUPPLY_PADRAO = 1_000_000_000
+PAPER_POSITIONS = {}
+PAPER_CAPITAL = CAPITAL_TOTAL
+PAPER_TP_PCT = 15
+PAPER_SL_PCT = 10
+PAPER_MAX_POS = 3
+PAPER_SIZE = 100
+
+def paper_abrir(mint, nome, simbolo, mc, preco):
+    global PAPER_POSITIONS
+    if len(PAPER_POSITIONS) >= PAPER_MAX_POS or mint in PAPER_POSITIONS:
+        return False
+    PAPER_POSITIONS[mint] = {'preco': preco, 'mc': mc, 'hora': datetime.now(), 'nome': nome, 'simbolo': simbolo}
+    print(f"[PAPER] Abriu: {simbolo} @ ${preco:.10f} | MC ${mc:,.0f}")
+    return True
+
+def paper_verificar():
+    global PAPER_POSITIONS, PAPER_CAPITAL
+    for mint in list(PAPER_POSITIONS.keys()):
+        pos = PAPER_POSITIONS[mint]
+        try:
+            resp = requests.get(f'https://frontend-api.pump.fun/coins/{mint}', timeout=5)
+            data = resp.json()
+            mc_atual = data.get('usd_market_cap', 0)
+            preco_atual = mc_atual / SUPPLY_PADRAO if SUPPLY_PADRAO > 0 else 0
+            if preco_atual > 0:
+                lucro_pct = ((preco_atual - pos['preco']) / pos['preco']) * 100
+                if lucro_pct >= PAPER_TP_PCT:
+                    lucro = (PAPER_SIZE * lucro_pct) / 100
+                    PAPER_CAPITAL += lucro
+                    print(f"[PAPER] ✅ TP! {pos['simbolo']} | +{lucro_pct:.1f}% | +${lucro:.2f}")
+                    del PAPER_POSITIONS[mint]
+                elif lucro_pct <= -PAPER_SL_PCT:
+                    perda = (PAPER_SIZE * abs(lucro_pct)) / 100
+                    PAPER_CAPITAL -= perda
+                    print(f"[PAPER] ❌ SL! {pos['simbolo']} | {lucro_pct:.1f}% | -${perda:.2f}")
+                    del PAPER_POSITIONS[mint]
+        except:
+            pass
+
+def paper_status():
+    lucro = PAPER_CAPITAL - CAPITAL_TOTAL
+    pct = (lucro / CAPITAL_TOTAL) * 100 if CAPITAL_TOTAL > 0 else 0
+    return f"[PAPER] Capital: ${PAPER_CAPITAL:.2f} | Lucro: ${lucro:+.2f} ({pct:+.1f}%) | Pos: {len(PAPER_POSITIONS)}/{PAPER_MAX_POS}"
+# ===================================
 
 # Preco do SOL em USD (atualizado a cada 5 min)
 SOL_PRICE_USD = 86.0
