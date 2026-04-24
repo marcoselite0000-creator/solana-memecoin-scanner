@@ -1,6 +1,6 @@
 # ============================================================
 # scanner.py — Nucleo do sistema: escuta Pump.fun em tempo real
-# Fonte: wss://pumpportal.fun/api/data (100% gratuito)
+# CORRECAO v2: usa dados do WebSocket diretamente (sem delay Dexscreener)
 # ============================================================
 
 import asyncio
@@ -10,11 +10,33 @@ import csv
 import os
 from datetime import datetime
 import websockets
+import requests
 
-from config import PUMP_WS_URL, LOG_FILE, CAPITAL_TOTAL
-from filters import analisar_token
+from config import PUMP_WS_URL, LOG_FILE, CAPITAL_TOTAL, MC_MIN, MC_MAX, LIQUIDEZ_MIN, IDADE_MAX_MIN, TAMANHO_POSICAO
 from alerts import alertar_terminal, alertar_telegram
 from tracker import Tracker
+
+# Preco do SOL em USD (atualizado a cada 5 min)
+SOL_PRICE_USD = 86.0
+_sol_price_last_update = 0
+
+
+def get_sol_price() -> float:
+    """Busca o preco atual do SOL em USD. Cache de 5 minutos."""
+    global SOL_PRICE_USD, _sol_price_last_update
+    agora = time.time()
+    if agora - _sol_price_last_update > 300:  # atualiza a cada 5 min
+        try:
+            resp = requests.get(
+                'https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd',
+                timeout=5
+            )
+            SOL_PRICE_USD = resp.json()['solana']['usd']
+            _sol_price_last_update = agora
+            print(f"[SOL] Preco atualizado: ${SOL_PRICE_USD}")
+        except Exception:
+            pass  # Usa o ultimo preco conhecido
+    return SOL_PRICE_USD
 
 
 def inicializar_log():
@@ -24,8 +46,7 @@ def inicializar_log():
             writer = csv.writer(f)
             writer.writerow([
                 'timestamp', 'mint', 'nome', 'simbolo',
-                'mc', 'liquidez', 'idade_min',
-                'variacao_5m', 'aprovado', 'razoes'
+                'mc', 'liquidez', 'aprovado', 'razoes'
             ])
 
 
@@ -40,56 +61,104 @@ def salvar_log(dados: dict):
             dados.get('simbolo', ''),
             dados.get('mc', 0),
             dados.get('liquidez', 0),
-            round(dados.get('idade_min', 0), 2),
-            dados.get('variacao_5m', 0),
             dados.get('aprovado', False),
             ' | '.join(dados.get('razoes_reprovado', []))
         ])
 
 
-async def processar_token(mint_address: str, tracker: Tracker):
+def extrair_dados_pump(data: dict) -> dict:
     """
-    Recebe um mint address novo do Pump.fun,
-    analisa e alerta se passar nos filtros.
+    Extrai e calcula MC e liquidez a partir dos dados
+    enviados pelo proprio WebSocket do Pump.fun.
     """
-    if tracker.meta_batida():
-        return  # Meta diaria atingida, para de processar
+    sol_price = get_sol_price()
 
-    if tracker.stop_diario_atingido():
-        return  # Stop diario atingido, para de operar
+    mint = data.get('mint', '')
+    nome = data.get('name', 'N/A')
+    simbolo = data.get('symbol', 'N/A')
 
-    # Pequena pausa para dar tempo do Dexscreener indexar o token
-    await asyncio.sleep(2)
+    # MC em SOL -> USD
+    # O Pump.fun envia marketCapSol ou vSolInBondingCurve
+    mc_sol = float(data.get('marketCapSol', 0) or data.get('vSolInBondingCurve', 0) or 0)
+    mc_usd = mc_sol * sol_price
 
-    dados = analisar_token(mint_address)
-    if not dados:
+    # Liquidez: usa vSolInBondingCurve como proxy da liquidez
+    liq_sol = float(data.get('vSolInBondingCurve', 0) or 0)
+    liq_usd = liq_sol * sol_price
+
+    # Link Pump.fun e Dexscreener
+    pump_url = f"https://pump.fun/{mint}"
+    dex_url = f"https://dexscreener.com/solana/{mint}"
+
+    return {
+        'mint': mint,
+        'nome': nome,
+        'simbolo': simbolo,
+        'mc': mc_usd,
+        'liquidez': liq_usd,
+        'mc_sol': mc_sol,
+        'liq_sol': liq_sol,
+        'pump_url': pump_url,
+        'dex_url': dex_url,
+        'idade_min': 0,  # token acabou de nascer
+        'variacao_5m': 0,
+    }
+
+
+def aplicar_filtros(dados: dict) -> tuple:
+    """Aplica os filtros e retorna (aprovado, lista_razoes)."""
+    reprovado = []
+
+    mc = dados.get('mc', 0)
+    liq = dados.get('liquidez', 0)
+
+    if mc < MC_MIN:
+        reprovado.append(f"MC baixo: ${mc:,.0f} < ${MC_MIN:,}")
+    elif mc > MC_MAX:
+        reprovado.append(f"MC alto: ${mc:,.0f} > ${MC_MAX:,}")
+
+    if liq < LIQUIDEZ_MIN:
+        reprovado.append(f"Liquidez baixa: ${liq:,.0f} < ${LIQUIDEZ_MIN:,}")
+
+    return len(reprovado) == 0, reprovado
+
+
+async def processar_token(data: dict, tracker: Tracker):
+    """Processa um token recebido do WebSocket do Pump.fun."""
+    if tracker.meta_batida() or tracker.stop_diario_atingido():
         return
+
+    dados = extrair_dados_pump(data)
+    aprovado, razoes = aplicar_filtros(dados)
+    dados['aprovado'] = aprovado
+    dados['razoes_reprovado'] = razoes
 
     salvar_log(dados)
 
-    if dados['aprovado']:
+    if aprovado:
         alertar_terminal(dados, tracker)
         await alertar_telegram(dados, tracker)
+        tracker.registrar_alerta()
     else:
-        # Log silencioso para tokens reprovados
-        print(f"[REPROVADO] {dados.get('simbolo','?')} "
-              f"MC=${dados.get('mc',0):,.0f} "
-              f"Liq=${dados.get('liquidez',0):,.0f} "
-              f"| {', '.join(dados.get('razoes_reprovado', []))}")
+        simbolo = dados.get('simbolo', '?')
+        mc = dados.get('mc', 0)
+        liq = dados.get('liquidez', 0)
+        print(f"[REPROVADO] {simbolo} MC=${mc:,.0f} Liq=${liq:,.0f} | {', '.join(razoes)}")
+
+    tracker.registrar_scan()
 
 
 async def escutar_pump():
-    """
-    Conecta ao WebSocket do Pump.fun e escuta novos tokens em tempo real.
-    Reconecta automaticamente em caso de queda.
-    """
+    """Conecta ao Pump.fun WebSocket e escuta novos tokens em tempo real."""
     tracker = Tracker(CAPITAL_TOTAL)
     inicializar_log()
+    get_sol_price()  # busca preco inicial do SOL
 
     print("=" * 60)
-    print(" SOLANA MEMECOIN SCANNER - Iniciando...")
+    print(" SOLANA MEMECOIN SCANNER v2 - Iniciando...")
     print(f" Capital: ${CAPITAL_TOTAL} | Meta: +{tracker.meta_pct}%/dia")
-    print(f" Filtros: MC ${tracker.mc_min:,}-${tracker.mc_max:,}")
+    print(f" Filtros: MC ${MC_MIN:,}-${MC_MAX:,} | Liq min: ${LIQUIDEZ_MIN:,}")
+    print(f" SOL Price: ${get_sol_price()}")
     print("=" * 60)
 
     while True:
@@ -100,7 +169,6 @@ async def escutar_pump():
                 ping_interval=20,
                 ping_timeout=10
             ) as ws:
-                # Inscreve no feed de novos tokens
                 payload = {"method": "subscribeNewToken"}
                 await ws.send(json.dumps(payload))
                 print("[WS] Conectado! Escutando novos tokens...\n")
@@ -108,8 +176,6 @@ async def escutar_pump():
                 async for message in ws:
                     try:
                         data = json.loads(message)
-
-                        # Pega o mint address do novo token
                         mint = data.get('mint') or data.get('mintAddress')
                         if not mint:
                             continue
@@ -118,30 +184,26 @@ async def escutar_pump():
                         simbolo = data.get('symbol', 'N/A')
                         print(f"[NOVO] {simbolo} ({nome}) | {mint[:8]}...")
 
-                        # Processa em background para nao bloquear o stream
-                        asyncio.create_task(
-                            processar_token(mint, tracker)
-                        )
+                        asyncio.create_task(processar_token(data, tracker))
 
                     except json.JSONDecodeError:
                         continue
                     except Exception as e:
-                        print(f"[ERRO] Processando mensagem: {e}")
+                        print(f"[ERRO] {e}")
 
         except websockets.exceptions.ConnectionClosed:
             print("[WS] Conexao fechada. Reconectando em 5s...")
             await asyncio.sleep(5)
         except Exception as e:
-            print(f"[WS] Erro de conexao: {e}. Reconectando em 10s...")
+            print(f"[WS] Erro: {e}. Reconectando em 10s...")
             await asyncio.sleep(10)
 
 
 def main():
-    """Ponto de entrada principal."""
     try:
         asyncio.run(escutar_pump())
     except KeyboardInterrupt:
-        print("\n[INFO] Scanner encerrado pelo usuario.")
+        print("\n[INFO] Scanner encerrado.")
 
 
 if __name__ == '__main__':
