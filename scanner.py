@@ -215,7 +215,7 @@ async def escutar_pump():
     tracker = Tracker(CAPITAL_TOTAL)
     inicializar_log()
     get_sol_price()  # busca preco inicial do SOL
-        asyncio.create_task(verificar_posicoes_loop())
+        cio.create_task(verificar_posicoes_loop())
 
     print("=" * 60)
     print(" SOLANA MEMECOIN SCANNER v3 - Paper Trading - Iniciando...")
