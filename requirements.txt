@@ -1,0 +1,6 @@
+# Dependencias do Solana Memecoin Scanner
+# Instale com: pip install -r requirements.txt
+
+websockets>=12.0
+requests>=2.31.0
+httpx>=0.27.0
